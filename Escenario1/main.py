@@ -48,10 +48,10 @@ def cargar_etiquetas_dataset(nombre_archivo):
     return data
 
 print("Cargando dataset MNIST...")
-X_train = cargar_imagenes_dataset(os.path.join('Resources', 'train-images-idx3-ubyte.gz'))
-y_train = cargar_etiquetas_dataset(os.path.join('Resources', 'train-labels-idx1-ubyte.gz'))
-X_test = cargar_imagenes_dataset(os.path.join('Resources', 't10k-images-idx3-ubyte.gz'))
-y_test = cargar_etiquetas_dataset(os.path.join('Resources', 't10k-labels-idx1-ubyte.gz'))
+X_train = cargar_imagenes_dataset(os.path.join('../Resources', 'train-images-idx3-ubyte.gz'))
+y_train = cargar_etiquetas_dataset(os.path.join('../Resources', 'train-labels-idx1-ubyte.gz'))
+X_test = cargar_imagenes_dataset(os.path.join('../Resources', 't10k-images-idx3-ubyte.gz'))
+y_test = cargar_etiquetas_dataset(os.path.join('../Resources', 't10k-labels-idx1-ubyte.gz'))
 
 print(f"Dataset cargado con {X_train.shape[0]} imágenes de entrenamiento y {X_test.shape[0]} imágenes de prueba.")
 
