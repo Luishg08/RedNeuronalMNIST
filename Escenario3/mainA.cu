@@ -3,8 +3,7 @@
 #include <math.h>   // Funciones matemáticas
 #include <time.h>   // Medición de tiempo
 #include <string.h> // Manipulación de cadenas
-#include <omp.h> // Paralelización a nivel de procesos usando OpenMP
-
+#include <cuda_runtime.h> // Librería para CUDA
 #pragma region Clases y Estructuras
 
 typedef struct
@@ -26,6 +25,29 @@ Matriz *crear_matriz(int filas, int columnas)
 
 #pragma endregion
 
+#pragma region KERNEL CUDA
+// [CUDA]El Kernel: Esta función corre DENTRO de la tarjeta gráfica
+// Calcula C = A * B. Cada hilo calcula UN solo píxel de la matriz resultado.
+__global__ void matmul_kernel(float *A, float *B, float *C, int rowsA, int colsA, int colsB)
+{
+    // Calculamos fila y columna global basándonos en el índice del hilo y del bloque
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Verificamos límites para no escribir fuera de memoria
+    if (row < rowsA && col < colsB)
+    {
+        float sum = 0.0f;
+        // Producto punto: Fila de A contra Columna de B
+        for (int k = 0; k < colsA; k++)
+        {
+            sum += A[row * colsA + k] * B[k * colsB + col];
+        }
+        C[row * colsB + col] = sum;
+    }
+}
+#pragma endregion
+
 #pragma region Manipular Matrices
 
 // Liberar la memoria ocupada por una matriz
@@ -42,7 +64,6 @@ void liberar_matriz(Matriz *m)
 // Inicializar una matriz con valores aleatorios entre -0.5 y 0.5
 void inicializar_matriz_aleatoria(Matriz *m)
 {
-    // NO se paraleliza: rand() no es thread-safe
     for (int i = 0; i < m->filas * m->columnas; i++)
     {
         m->datos[i] = ((float)rand() / RAND_MAX) - 0.5f; // Valores entre -0.5 y 0.5
@@ -56,36 +77,58 @@ void limpiar_matriz(Matriz *m)
 }
 
 // Multiplicar dos matrices A y B, almacenar el resultado en C
+// Se encarga de la logística: CPU -> GPU -> Kernel -> CPU
 void multiplicar_matrices(Matriz *A, Matriz *B, Matriz *C)
 {
     if (A->columnas != B->filas)
     {
-        printf("Error: dimensiones no compatibles para multiplicación de matrices.\n");
+        printf("Error: dimensiones no compatibles.\n");
         exit(1);
     }
 
-    // SÍ se paraleliza: operación muy costosa con matrices grandes (64x784 * 784x512 = ~25M operaciones)
-    #pragma omp parallel for collapse(2)
-    for (int i = 0; i < A->filas; i++)
-    {
-        for (int j = 0; j < B->columnas; j++)
-        {
-            float sum = 0.0f;
-            for (int k = 0; k < A->columnas; k++)
-            {
-                sum += A->datos[i * A->columnas + k] * B->datos[k * B->columnas + j];
-            }
-            C->datos[i * C->columnas + j] = sum;
-        }
-    }
+    // Calcular tamaños en bytes
+    size_t size_A = A->filas * A->columnas * sizeof(float);
+    size_t size_B = B->filas * B->columnas * sizeof(float);
+    size_t size_C = C->filas * C->columnas * sizeof(float);
+
+    // Punteros para memoria en GPU
+    float *d_A, *d_B, *d_C;
+
+    // Reservar memoria en la GPU (cudaMalloc)
+    cudaMalloc((void**)&d_A, size_A);
+    cudaMalloc((void**)&d_B, size_B);
+    cudaMalloc((void**)&d_C, size_C);
+
+    // Copiar datos de la RAM a la VRAM
+    cudaMemcpy(d_A, A->datos, size_A, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, B->datos, size_B, cudaMemcpyHostToDevice);
+
+    // Configurar la cuadrícula de hilos
+    // Bloques de 16x16 hilos
+    dim3 threadsPerBlock(16, 16);
+    // Calculamos cuántos bloques necesitamos (redondeando hacia arriba)
+    dim3 blocksPerGrid((C->columnas + 15) / 16, (C->filas + 15) / 16);
+
+    //LANZAR EL KERNEL
+    matmul_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, A->filas, A->columnas, B->columnas);
+
+    // Esperar a que la GPU termine
+    cudaDeviceSynchronize();
+
+    //Copiar resultados de vuelta a la CPU
+    cudaMemcpy(C->datos, d_C, size_C, cudaMemcpyDeviceToHost);
+
+    //Liberar memoria de GPU
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
 }
 
 // Calcular la transpuesta de una matriz A y almacenarla en B
 // Asume que B ya ha sido inicializada con las dimensiones correctas (Dimensiones invertidas de A)
-// SÍ se paraleliza: matrices grandes (64x784, 64x512) con operaciones independientes
+// Se utiliza para la propagación hacia atrás en redes neuronales: dW = A^T * dZ
 void transpuesta(Matriz *A, Matriz *B)
 {
-    #pragma omp parallel for collapse(2)
     for (int i = 0; i < A->filas; i++)
     {
         for (int j = 0; j < A->columnas; j++)
@@ -98,7 +141,6 @@ void transpuesta(Matriz *A, Matriz *B)
 
 void sumar_sesgo(Matriz *m, Matriz *b)
 {
-    // NO se paraleliza: operación muy rápida
     for (int i = 0; i < m->filas; i++)
     {
         for (int j = 0; j < m->columnas; j++)
@@ -110,8 +152,6 @@ void sumar_sesgo(Matriz *m, Matriz *b)
 // Multiplicar una matriz por un escalar
 void multiplicar_escalar(Matriz *m, float escalar)
 {
-    // NO se paraleliza: operación trivial muy rápida, overhead > beneficio
-    //#pragma omp parallel for simd
     for (int i = 0; i < m->filas * m->columnas; i++)
     {
         m->datos[i] *= escalar;
@@ -121,8 +161,6 @@ void multiplicar_escalar(Matriz *m, float escalar)
 // Restar matrices A = A - B
 void restar_matrices(Matriz *A, Matriz *B)
 {
-    // NO se paraleliza: operación muy rápida con acceso secuencial a memoria, overhead > beneficio
-    //#pragma omp parallel for simd
     for (int i = 0; i < A->filas * A->columnas; i++)
     {
         A->datos[i] -= B->datos[i];
@@ -136,7 +174,6 @@ void restar_matrices(Matriz *A, Matriz *B)
 // Función de activación ReLU: Si x < 0, devuelve 0; si x >= 0, devuelve x
 void relu(Matriz *m)
 {
-    // NO se paraleliza: operación simple
     for (int i = 0; i < m->filas * m->columnas; i++)
     {
         if (m->datos[i] < 0)
@@ -147,7 +184,6 @@ void relu(Matriz *m)
 // Softmax: Convierte números en probabilidades
 void softmax(Matriz *m)
 {
-    // NO se paraleliza: solo 64 filas y bucles internos tienen dependencias secuenciales (max, sum)
     for (int i = 0; i < m->filas; i++)
     {
         // Buscar máximo de la fila (estabilidad numérica)
@@ -178,7 +214,6 @@ int argmax(Matriz *m, int row)
 {
     float max_val = -1e9;
     int max_index = 0;
-    // NO se paraleliza: solo 10 columnas
     for (int j = 0; j < m->columnas; j++)
     {
         if (m->datos[row * m->columnas + j] > max_val)
@@ -269,8 +304,8 @@ int main()
     const int TAMAÑO_BATCH = 64;
 
     printf("Cargando datos...\n");
-    Matriz *X_train = cargar_imagenes_dataset("../Resources/train-images.idx3-ubyte");
-    Matriz *Y_train = cargar_etiquetas_dataset("../Resources/train-labels.idx1-ubyte");
+    Matriz *X_train = cargar_imagenes_dataset("./Resources/train-images.idx3-ubyte");
+    Matriz *Y_train = cargar_etiquetas_dataset("./Resources/train-labels.idx1-ubyte");
     printf("Entrenamiento: %d imagenes cargadas.\n", X_train->filas);
 
     // Inicializar pesos y sesgos
@@ -313,12 +348,9 @@ int main()
     // Medición de tiempo
     clock_t inicio_tiempo = clock();
     // Bucle de entrenamiento
-
-    // No se paraleliza ya que cada época depende de la anterior
     for (int epoca = 0; epoca < EPOCAS; epoca++)
     {
         // Mezclar datos al inicio de cada época
-        // NO se paraleliza: rand() no es thread-safe y el algoritmo es secuencial
         for (int k = X_train->filas - 1; k > 0; k--)
         {
             int j = rand() % (k + 1);
@@ -326,13 +358,11 @@ int main()
             indices[k] = indices[j];
             indices[j] = temp;
         }
-        
-        // NO se paraleliza: cada batch depende de los pesos actualizados del batch anterior (SGD secuencial)
+
         for (int i = 0; i < X_train->filas; i += TAMAÑO_BATCH)
         {
             int batch_actual = (i + TAMAÑO_BATCH > X_train->filas) ? X_train->filas - i : TAMAÑO_BATCH;
             // Preparar Batch
-            // NO se paraleliza: memcpy ya está optimizado y son solo 64 copias pequeñas
             for (int b = 0; b < batch_actual; b++)
             {
                 int idx = indices[i + b];
@@ -347,12 +377,12 @@ int main()
             A2->filas = batch_actual;
 
             // Propagación hacia adelante
-            multiplicar_matrices(X_batch, W1, Z1);
+            multiplicar_matrices(X_batch, W1, Z1); //Llamado interno a CUDA
             sumar_sesgo(Z1, b1);
             memcpy(A1->datos, Z1->datos, batch_actual * TAMAÑO_CAPA_OCULTA * sizeof(float));
             relu(A1);
 
-            multiplicar_matrices(A1, W2, Z2);
+            multiplicar_matrices(A1, W2, Z2); //Llamado interno a CUDA
             sumar_sesgo(Z2, b2);
             memcpy(A2->datos, Z2->datos, batch_actual * TAMAÑO_SALIDA * sizeof(float));
             softmax(A2);
@@ -360,8 +390,6 @@ int main()
             // Propagación hacia atrás
             // dZ2 = A2 - Y (one-hot)
             memcpy(dZ2->datos, A2->datos, batch_actual * TAMAÑO_SALIDA * sizeof(float));
-            // SÍ se paraleliza: 64 iteraciones completamente independientes con SIMD para operaciones vectoriales
-            #pragma omp parallel for simd
             for (int b = 0; b < batch_actual; b++)
             {
                 dZ2->datos[b * TAMAÑO_SALIDA + (int)Y_batch->datos[b]] -= 1.0f;
@@ -370,12 +398,10 @@ int main()
             // Grads Capa 2
             A1->filas = batch_actual; // Asegurar dim correcta
             transpuesta(A1, A1_T);
-            multiplicar_matrices(A1_T, dZ2, dW2);
+            multiplicar_matrices(A1_T, dZ2, dW2); //Llamado interno a CUDA
             multiplicar_escalar(dW2, 1.0f / batch_actual);
 
             limpiar_matriz(db2);
-            // SÍ se paraleliza: 640 sumas (64x10) con reduction para evitar race conditions
-            #pragma omp parallel for reduction(+:db2->datos[:TAMAÑO_SALIDA])
             for (int r = 0; r < batch_actual; r++)
             {
                 for (int c = 0; c < TAMAÑO_SALIDA; c++)
@@ -385,9 +411,7 @@ int main()
 
             // Error Capa 1
             transpuesta(W2, W2_T);
-            multiplicar_matrices(dZ2, W2_T, dZ1);
-            // SÍ se paraleliza: 32,768 operaciones independientes (64x512) con cálculo simple
-            #pragma omp parallel for
+            multiplicar_matrices(dZ2, W2_T, dZ1); //Llamado interno a CUDA
             for (int k = 0; k < batch_actual * TAMAÑO_CAPA_OCULTA; k++)
             {
                 if (Z1->datos[k] <= 0)
@@ -401,8 +425,6 @@ int main()
             multiplicar_escalar(dW1, 1.0f / batch_actual);
 
             limpiar_matriz(db1);
-            // SÍ se paraleliza: 32,768 sumas (64x512) con reduction para evitar race conditions
-            #pragma omp parallel for reduction(+:db1->datos[:TAMAÑO_CAPA_OCULTA])
             for (int r = 0; r < batch_actual; r++)
             {
                 for (int c = 0; c < TAMAÑO_CAPA_OCULTA; c++)
@@ -458,6 +480,6 @@ int main()
 
 #pragma region Ejecución
 // Ejecutar con:
-// gcc mainB.c -o mlp -lm -fopenmp -O3
+// gcc mainB.c -o mlp -lm -O3
 // ./mlp
 #pragma endregion
