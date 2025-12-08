@@ -400,47 +400,6 @@ int main()
     double total_time = (double)(clock() - inicio_tiempo) / CLOCKS_PER_SEC;
     printf("Entrenamiento C finalizado en %.2f segundos.\n", total_time);
 
-    printf("\n--- Evaluando en el conjunto de prueba ---\n");
-    Matriz *X_test = cargar_imagenes_dataset("../Resources/t10k-images.idx3-ubyte");
-    Matriz *Y_test = cargar_etiquetas_dataset("../Resources/t10k-labels.idx1-ubyte");
-
-    // Matrices temporales para el test
-    // Lo hacemos todo de una vez (Full Batch) porque 10,000 imgs caben en RAM
-    Matriz *Z1_t = crear_matriz(X_test->filas, TAMAÑO_CAPA_OCULTA);
-    Matriz *A1_t = crear_matriz(X_test->filas, TAMAÑO_CAPA_OCULTA);
-    Matriz *Z2_t = crear_matriz(X_test->filas, TAMAÑO_SALIDA);
-    Matriz *A2_t = crear_matriz(X_test->filas, TAMAÑO_SALIDA);
-
-    // Forward Pass
-    multiplicar_matrices(X_test, W1, Z1_t);
-    sumar_sesgo(Z1_t, b1);
-
-    // Copiar y ReLU
-    memcpy(A1_t->datos, Z1_t->datos, X_test->filas * TAMAÑO_CAPA_OCULTA * sizeof(float));
-    relu(A1_t);
-
-    multiplicar_matrices(A1_t, W2, Z2_t);
-    sumar_sesgo(Z2_t, b2);
-
-    // Copiar y Softmax
-    memcpy(A2_t->datos, Z2_t->datos, X_test->filas * TAMAÑO_SALIDA * sizeof(float));
-    softmax(A2_t);
-
-    // Comparar predicciones
-    int correct = 0;
-    for (int i = 0; i < X_test->filas; i++)
-    {
-        int prediction = argmax(A2_t, i);
-        int actual = (int)Y_test->datos[i];
-        if (prediction == actual)
-        {
-            correct++;
-        }
-    }
-
-    printf("Precision Final: %.2f%% (%d/%d correctas)\n",
-           (float)correct / X_test->filas * 100.0f, correct, X_test->filas);
-
 #pragma endregion
 
 #pragma region Limpiar Memoria
