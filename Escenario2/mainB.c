@@ -42,7 +42,7 @@ void liberar_matriz(Matriz *m)
 // Inicializar una matriz con valores aleatorios entre -0.5 y 0.5
 void inicializar_matriz_aleatoria(Matriz *m)
 {
-    // No se usa #pragma omp aquí porque la función rand() ya que no es thread-safe
+    // NO se paraleliza: rand() no es thread-safe
     for (int i = 0; i < m->filas * m->columnas; i++)
     {
         m->datos[i] = ((float)rand() / RAND_MAX) - 0.5f; // Valores entre -0.5 y 0.5
@@ -64,13 +64,7 @@ void multiplicar_matrices(Matriz *A, Matriz *B, Matriz *C)
         exit(1);
     }
 
-    // #pragma omp parallel for:
-    //      Le dice al compilador que el bucle 'for' que sigue se debe repartir entre hilos.
-    //      el bucle de 0 a N se divide en M partes automáticamente si se tienen M núcleos.
-    //
-    // collapse(2):
-    //     Indica a la directiva que combine los dos bucles anidados (i y j)
-    //
+    // SÍ se paraleliza: operación muy costosa con matrices grandes (64x784 * 784x512 = ~25M operaciones)
     #pragma omp parallel for collapse(2)
     for (int i = 0; i < A->filas; i++)
     {
@@ -88,7 +82,7 @@ void multiplicar_matrices(Matriz *A, Matriz *B, Matriz *C)
 
 // Calcular la transpuesta de una matriz A y almacenarla en B
 // Asume que B ya ha sido inicializada con las dimensiones correctas (Dimensiones invertidas de A)
-// Se utiliza para la propagación hacia atrás en redes neuronales: dW = A^T * dZ
+// SÍ se paraleliza: matrices grandes (64x784, 64x512) con operaciones independientes
 void transpuesta(Matriz *A, Matriz *B)
 {
     #pragma omp parallel for collapse(2)
@@ -104,7 +98,7 @@ void transpuesta(Matriz *A, Matriz *B)
 
 void sumar_sesgo(Matriz *m, Matriz *b)
 {
-    #pragma omp parallel for collapse(2)
+    // NO se paraleliza: operación muy rápida
     for (int i = 0; i < m->filas; i++)
     {
         for (int j = 0; j < m->columnas; j++)
@@ -116,8 +110,8 @@ void sumar_sesgo(Matriz *m, Matriz *b)
 // Multiplicar una matriz por un escalar
 void multiplicar_escalar(Matriz *m, float escalar)
 {
-    // Se agrega SIMD para paralelizar a nivel de instrucciones, aprovechando registros vectoriales
-    #pragma omp parallel for simd
+    // NO se paraleliza: operación trivial muy rápida, overhead > beneficio
+    //#pragma omp parallel for simd
     for (int i = 0; i < m->filas * m->columnas; i++)
     {
         m->datos[i] *= escalar;
@@ -127,8 +121,8 @@ void multiplicar_escalar(Matriz *m, float escalar)
 // Restar matrices A = A - B
 void restar_matrices(Matriz *A, Matriz *B)
 {
-    // Se agrega SIMD para paralelizar a nivel de instrucciones, aprovechando registros vectoriales
-    #pragma omp parallel for simd
+    // NO se paraleliza: operación muy rápida con acceso secuencial a memoria, overhead > beneficio
+    //#pragma omp parallel for simd
     for (int i = 0; i < A->filas * A->columnas; i++)
     {
         A->datos[i] -= B->datos[i];
@@ -142,7 +136,7 @@ void restar_matrices(Matriz *A, Matriz *B)
 // Función de activación ReLU: Si x < 0, devuelve 0; si x >= 0, devuelve x
 void relu(Matriz *m)
 {
-    #pragma omp parallel for
+    // NO se paraleliza: operación simple
     for (int i = 0; i < m->filas * m->columnas; i++)
     {
         if (m->datos[i] < 0)
@@ -153,7 +147,7 @@ void relu(Matriz *m)
 // Softmax: Convierte números en probabilidades
 void softmax(Matriz *m)
 {
-    #pragma omp parallel for
+    // NO se paraleliza: solo 64 filas y bucles internos tienen dependencias secuenciales (max, sum)
     for (int i = 0; i < m->filas; i++)
     {
         // Buscar máximo de la fila (estabilidad numérica)
@@ -184,7 +178,7 @@ int argmax(Matriz *m, int row)
 {
     float max_val = -1e9;
     int max_index = 0;
-    #pragma omp parallel for
+    // NO se paraleliza: solo 10 columnas
     for (int j = 0; j < m->columnas; j++)
     {
         if (m->datos[row * m->columnas + j] > max_val)
@@ -324,7 +318,7 @@ int main()
     for (int epoca = 0; epoca < EPOCAS; epoca++)
     {
         // Mezclar datos al inicio de cada época
-        // No se paraleliza porque rand() no es thread-safe
+        // NO se paraleliza: rand() no es thread-safe y el algoritmo es secuencial
         for (int k = X_train->filas - 1; k > 0; k--)
         {
             int j = rand() % (k + 1);
@@ -333,12 +327,12 @@ int main()
             indices[j] = temp;
         }
         
-        // No se paraleliza ya que cada batch depende de la actualización de los pesos del batch anterior
+        // NO se paraleliza: cada batch depende de los pesos actualizados del batch anterior (SGD secuencial)
         for (int i = 0; i < X_train->filas; i += TAMAÑO_BATCH)
         {
             int batch_actual = (i + TAMAÑO_BATCH > X_train->filas) ? X_train->filas - i : TAMAÑO_BATCH;
             // Preparar Batch
-            // No se paraleliza ya que es una operación de copia simple
+            // NO se paraleliza: memcpy ya está optimizado y son solo 64 copias pequeñas
             for (int b = 0; b < batch_actual; b++)
             {
                 int idx = indices[i + b];
@@ -366,6 +360,8 @@ int main()
             // Propagación hacia atrás
             // dZ2 = A2 - Y (one-hot)
             memcpy(dZ2->datos, A2->datos, batch_actual * TAMAÑO_SALIDA * sizeof(float));
+            // SÍ se paraleliza: 64 iteraciones completamente independientes con SIMD para operaciones vectoriales
+            #pragma omp parallel for simd
             for (int b = 0; b < batch_actual; b++)
             {
                 dZ2->datos[b * TAMAÑO_SALIDA + (int)Y_batch->datos[b]] -= 1.0f;
@@ -378,6 +374,8 @@ int main()
             multiplicar_escalar(dW2, 1.0f / batch_actual);
 
             limpiar_matriz(db2);
+            // SÍ se paraleliza: 640 sumas (64x10) con reduction para evitar race conditions
+            #pragma omp parallel for reduction(+:db2->datos[:TAMAÑO_SALIDA])
             for (int r = 0; r < batch_actual; r++)
             {
                 for (int c = 0; c < TAMAÑO_SALIDA; c++)
@@ -388,6 +386,8 @@ int main()
             // Error Capa 1
             transpuesta(W2, W2_T);
             multiplicar_matrices(dZ2, W2_T, dZ1);
+            // SÍ se paraleliza: 32,768 operaciones independientes (64x512) con cálculo simple
+            #pragma omp parallel for
             for (int k = 0; k < batch_actual * TAMAÑO_CAPA_OCULTA; k++)
             {
                 if (Z1->datos[k] <= 0)
@@ -401,6 +401,8 @@ int main()
             multiplicar_escalar(dW1, 1.0f / batch_actual);
 
             limpiar_matriz(db1);
+            // SÍ se paraleliza: 32,768 sumas (64x512) con reduction para evitar race conditions
+            #pragma omp parallel for reduction(+:db1->datos[:TAMAÑO_CAPA_OCULTA])
             for (int r = 0; r < batch_actual; r++)
             {
                 for (int c = 0; c < TAMAÑO_CAPA_OCULTA; c++)
@@ -497,6 +499,6 @@ int main()
 
 #pragma region Ejecución
 // Ejecutar con:
-// gcc mainB.c -o mlp -lm -O3
+// gcc mainB.c -o mlp -lm -fopenmp -O3
 // ./mlp
 #pragma endregion
