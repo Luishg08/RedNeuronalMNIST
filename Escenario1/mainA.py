@@ -100,6 +100,19 @@ def one_hot(y, num_classes):
     one_hot_y[np.arange(y.size), y] = 1
     return one_hot_y
 
+# Función que calcula la pérdida (loss) de entropía cruzada
+def calcular_loss(A2, Y):
+    """Calcula el promedio de la Pérdida de Entropía Cruzada (Cross-Entropy Loss)."""
+    m = Y.size
+    Y_one_hot = one_hot(Y, TAMAÑO_SALIDA)
+    
+    # Asegurar la estabilidad numérica: prevenir log(0)
+    A2_clipped = np.clip(A2, 1e-12, 1.0 - 1e-12) 
+    
+    # Fórmula de Cross-Entropy Loss
+    cost = - (1/m) * np.sum(Y_one_hot * np.log(A2_clipped))
+    return cost
+
 #endregion
 
 #region Entrenamiento
@@ -198,8 +211,20 @@ for epoca in range(EPOCAS):
         # Actualizar parámetros
         W1, b1, W2, b2 = actualizar_parametros(W1, b1, W2, b2, dW1, db1, dW2, db2, TASA_APRENDIZAJE)
     
+    # --- Cálculo y Reporte de Métricas al final de la Época ---
+    
+    # Volvemos a calcular A2 usando todo el dataset mezclado para métricas de época
+    A2_epoca, _ = propagacion_adelante(X_shuffled, W1, b1, W2, b2) 
+    
+    # Precisión
+    precision = np.mean(np.argmax(A2_epoca, axis=1) == y_shuffled)
+    
+    # Pérdida (Loss)
+    loss_valor = calcular_loss(A2_epoca, y_shuffled)
+    
     print(f"Época {epoca+1}/{EPOCAS} completada")
-    print(f"Presición etapa {epoca+1}: {np.mean(np.argmax(A2, axis=1) == y_batch):.4f}")
-        
+    print(f" -> Precisión: {precision:.4f}")
+    print(f" -> Loss (Pérdida): {loss_valor:.4f}")
+    
 fin_tiempo = time.time()
 print(f"Entrenamiento finalizado en {fin_tiempo - inicio_tiempo:.2f} segundos.")
