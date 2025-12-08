@@ -255,8 +255,8 @@ int main()
     const int TAMAÑO_BATCH = 64;
 
     printf("Cargando datos...\n");
-    Matriz *X_train = cargar_imagenes_dataset("../Resources/train-images.idx3-ubyte");
-    Matriz *Y_train = cargar_etiquetas_dataset("../Resources/train-labels.idx1-ubyte");
+    Matriz *X_train = cargar_imagenes_dataset("./Resources/train-images.idx3-ubyte");
+    Matriz *Y_train = cargar_etiquetas_dataset("./Resources/train-labels.idx1-ubyte");
     printf("Entrenamiento: %d imagenes cargadas.\n", X_train->filas);
 
     // Inicializar pesos y sesgos
