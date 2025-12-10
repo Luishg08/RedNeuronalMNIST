@@ -55,6 +55,12 @@ gcc ./Escenario1/mainB.c -o ./Escenario1/mlp -lm -O3
 ./Escenario1/mlp.exe
 ```
 
+### Escenario 2 - Python (Multiprocessing)
+
+```bash
+python ./Escenario2/mainA.py
+```
+
 ### Escenario 2 - C con OpenMP (Paralelo)
 
 ```bash

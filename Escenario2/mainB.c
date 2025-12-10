@@ -374,8 +374,9 @@ int main()
             multiplicar_escalar(dW2, 1.0f / batch_actual);
 
             limpiar_matriz(db2);
-            // SÍ se paraleliza: 640 sumas (64x10) con reduction para evitar race conditions
-            #pragma omp parallel for reduction(+:db2->datos[:TAMAÑO_SALIDA])
+            // SÍ se paraleliza: 640 sumas (64x10) 
+            float *db2_local = db2->datos; // Puntero local para reduction
+            #pragma omp parallel for reduction(+:db2_local[:TAMAÑO_SALIDA])
             for (int r = 0; r < batch_actual; r++)
             {
                 for (int c = 0; c < TAMAÑO_SALIDA; c++)
@@ -387,7 +388,8 @@ int main()
             transpuesta(W2, W2_T);
             multiplicar_matrices(dZ2, W2_T, dZ1);
             // SÍ se paraleliza: 32,768 operaciones independientes (64x512) con cálculo simple
-            #pragma omp parallel for
+            float *db1_local = db1->datos; // Puntero local para reduction
+            #pragma omp parallel for reduction(+:db1_local[:TAMAÑO_CAPA_OCULTA])
             for (int k = 0; k < batch_actual * TAMAÑO_CAPA_OCULTA; k++)
             {
                 if (Z1->datos[k] <= 0)
@@ -402,7 +404,7 @@ int main()
 
             limpiar_matriz(db1);
             // SÍ se paraleliza: 32,768 sumas (64x512) con reduction para evitar race conditions
-            #pragma omp parallel for reduction(+:db1->datos[:TAMAÑO_CAPA_OCULTA])
+            #pragma omp parallel for
             for (int r = 0; r < batch_actual; r++)
             {
                 for (int c = 0; c < TAMAÑO_CAPA_OCULTA; c++)
@@ -425,7 +427,7 @@ int main()
 #pragma endregion
 #pragma region Evaluación
     double total_time = (double)(clock() - inicio_tiempo) / CLOCKS_PER_SEC;
-    printf("Entrenamiento C finalizado en %.2f segundos.\n", total_time);
+    printf("Entrenamiento C con OpenMp finalizado en %.2f segundos.\n", total_time);
 
 #pragma endregion
 
