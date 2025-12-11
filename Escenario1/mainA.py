@@ -216,15 +216,25 @@ for epoca in range(EPOCAS):
     # Volvemos a calcular A2 usando todo el dataset mezclado para métricas de época
     A2_epoca, _ = propagacion_adelante(X_shuffled, W1, b1, W2, b2) 
     
-    # Precisión
-    precision = np.mean(np.argmax(A2_epoca, axis=1) == y_shuffled)
+    # Precisión de entrenamiento
+    precision_train = np.mean(np.argmax(A2_epoca, axis=1) == y_shuffled)
     
-    # Pérdida (Loss)
-    loss_valor = calcular_loss(A2_epoca, y_shuffled)
+    # Pérdida (Loss) de entrenamiento
+    loss_train = calcular_loss(A2_epoca, y_shuffled)
     
     print(f"Época {epoca+1}/{EPOCAS} completada")
-    print(f" -> Precisión: {precision:.4f}")
-    print(f" -> Loss (Pérdida): {loss_valor:.4f}")
+    print(f"  -> Precisión Entrenamiento: {precision_train:.4f}")
+    print(f"  -> Loss Entrenamiento: {loss_train:.4f}")
     
 fin_tiempo = time.time()
-print(f"Entrenamiento finalizado en {fin_tiempo - inicio_tiempo:.2f} segundos.")
+print(f"\nEntrenamiento finalizado en {fin_tiempo - inicio_tiempo:.2f} segundos.")
+
+# --- Evaluación Final en Conjunto de Prueba ---
+print("\n--- Evaluando en el conjunto de prueba ---")
+A2_test, _ = propagacion_adelante(X_test, W1, b1, W2, b2)
+precision_test = np.mean(np.argmax(A2_test, axis=1) == y_test)
+loss_test = calcular_loss(A2_test, y_test)
+
+print(f"Precisión Final (Test): {precision_test:.4f} ({int(precision_test * 100)}%)")
+print(f"Loss Final (Test): {loss_test:.4f}")
+print(f"Imágenes correctas: {int(precision_test * len(y_test))}/{len(y_test)}")

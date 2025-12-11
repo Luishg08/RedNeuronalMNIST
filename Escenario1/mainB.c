@@ -176,6 +176,36 @@ int argmax(Matriz *m, int row)
     return max_index;
 }
 
+// Calcular precisión comparando predicciones con etiquetas reales
+float calcular_precision(Matriz *predicciones, Matriz *etiquetas)
+{
+    int correctas = 0;
+    for (int i = 0; i < predicciones->filas; i++)
+    {
+        int pred = argmax(predicciones, i);
+        int real = (int)etiquetas->datos[i];
+        if (pred == real)
+            correctas++;
+    }
+    return (float)correctas / predicciones->filas;
+}
+
+// Calcular la pérdida de entropía cruzada (Cross-Entropy Loss)
+float calcular_loss(Matriz *predicciones, Matriz *etiquetas, int num_clases)
+{
+    float loss = 0.0f;
+    for (int i = 0; i < predicciones->filas; i++)
+    {
+        int etiqueta_real = (int)etiquetas->datos[i];
+        // Obtener la probabilidad predicha para la clase correcta
+        float prob = predicciones->datos[i * num_clases + etiqueta_real];
+        // Evitar log(0) agregando un epsilon pequeño
+        if (prob < 1e-12f) prob = 1e-12f;
+        loss -= logf(prob);
+    }
+    return loss / predicciones->filas;
+}
+
 #pragma endregion
 
 #pragma region Cargar Datos
@@ -393,12 +423,81 @@ int main()
             multiplicar_escalar(db2, TASA_APRENDIZAJE);
             restar_matrices(b2, db2);
         }
-        printf("Epoca %d completada.\n", epoca + 1);
+        
+        // Calcular métricas al final de cada época
+        // Crear matrices temporales para evaluación de toda la época
+        Matriz *Z1_eval = crear_matriz(X_train->filas, TAMAÑO_CAPA_OCULTA);
+        Matriz *A1_eval = crear_matriz(X_train->filas, TAMAÑO_CAPA_OCULTA);
+        Matriz *Z2_eval = crear_matriz(X_train->filas, TAMAÑO_SALIDA);
+        Matriz *A2_eval = crear_matriz(X_train->filas, TAMAÑO_SALIDA);
+        
+        // Forward pass con todo el dataset de entrenamiento
+        multiplicar_matrices(X_train, W1, Z1_eval);
+        sumar_sesgo(Z1_eval, b1);
+        memcpy(A1_eval->datos, Z1_eval->datos, X_train->filas * TAMAÑO_CAPA_OCULTA * sizeof(float));
+        relu(A1_eval);
+        
+        multiplicar_matrices(A1_eval, W2, Z2_eval);
+        sumar_sesgo(Z2_eval, b2);
+        memcpy(A2_eval->datos, Z2_eval->datos, X_train->filas * TAMAÑO_SALIDA * sizeof(float));
+        softmax(A2_eval);
+        
+        // Calcular precisión y pérdida
+        float precision_train = calcular_precision(A2_eval, Y_train);
+        float loss_train = calcular_loss(A2_eval, Y_train, TAMAÑO_SALIDA);
+        
+        printf("Epoca %d/%d completada\n", epoca + 1, EPOCAS);
+        printf("  -> Precision Entrenamiento: %.4f\n", precision_train);
+        printf("  -> Loss Entrenamiento: %.4f\n", loss_train);
+        
+        // Liberar matrices temporales
+        liberar_matriz(Z1_eval);
+        liberar_matriz(A1_eval);
+        liberar_matriz(Z2_eval);
+        liberar_matriz(A2_eval);
     }
 #pragma endregion
 #pragma region Evaluación
     double total_time = (double)(clock() - inicio_tiempo) / CLOCKS_PER_SEC;
-    printf("Entrenamiento C finalizado en %.2f segundos.\n", total_time);
+    printf("\nEntrenamiento C finalizado en %.2f segundos.\n", total_time);
+
+    printf("\n--- Evaluando en el conjunto de prueba ---\n");
+    Matriz *X_test = cargar_imagenes_dataset("./Resources/t10k-images.idx3-ubyte");
+    Matriz *Y_test = cargar_etiquetas_dataset("./Resources/t10k-labels.idx1-ubyte");
+
+    // Matrices temporales para el test
+    Matriz *Z1_t = crear_matriz(X_test->filas, TAMAÑO_CAPA_OCULTA);
+    Matriz *A1_t = crear_matriz(X_test->filas, TAMAÑO_CAPA_OCULTA);
+    Matriz *Z2_t = crear_matriz(X_test->filas, TAMAÑO_SALIDA);
+    Matriz *A2_t = crear_matriz(X_test->filas, TAMAÑO_SALIDA);
+
+    // Forward Pass
+    multiplicar_matrices(X_test, W1, Z1_t);
+    sumar_sesgo(Z1_t, b1);
+    memcpy(A1_t->datos, Z1_t->datos, X_test->filas * TAMAÑO_CAPA_OCULTA * sizeof(float));
+    relu(A1_t);
+
+    multiplicar_matrices(A1_t, W2, Z2_t);
+    sumar_sesgo(Z2_t, b2);
+    memcpy(A2_t->datos, Z2_t->datos, X_test->filas * TAMAÑO_SALIDA * sizeof(float));
+    softmax(A2_t);
+
+    // Calcular métricas finales
+    float precision_test = calcular_precision(A2_t, Y_test);
+    float loss_test = calcular_loss(A2_t, Y_test, TAMAÑO_SALIDA);
+    int correctas = (int)(precision_test * X_test->filas);
+
+    printf("Precision Final (Test): %.4f (%d%%)\n", precision_test, (int)(precision_test * 100));
+    printf("Loss Final (Test): %.4f\n", loss_test);
+    printf("Imagenes correctas: %d/%d\n", correctas, X_test->filas);
+
+    // Liberar memoria de test
+    liberar_matriz(X_test);
+    liberar_matriz(Y_test);
+    liberar_matriz(Z1_t);
+    liberar_matriz(A1_t);
+    liberar_matriz(Z2_t);
+    liberar_matriz(A2_t);
 
 #pragma endregion
 

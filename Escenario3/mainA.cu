@@ -1,19 +1,30 @@
-#include <stdio.h>  // Leer y escribir en consola
-#include <stdlib.h> // Funciones generales de utilidad
-#include <math.h>   // Funciones matemáticas
-#include <time.h>   // Medición de tiempo
-#include <string.h> // Manipulación de cadenas
-#include <cuda_runtime.h> // Librería para CUDA
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+#include <string.h>
+#include <cuda_runtime.h>
+
+// MACRO DE SEGURIDAD PARA CUDA
+// Si alguna función de CUDA falla, esto imprime el error y la línea exacta.
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            fprintf(stderr, "Error CUDA en %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+            exit(1); \
+        } \
+    } while (0)
+
 #pragma region Clases y Estructuras
 
 typedef struct
 {
     int filas;
     int columnas;
-    float *datos; // Puntero a los datos de la matriz en una sola dimensión
+    float *datos;
 } Matriz;
 
-// Crear una matriz con dimensiones dadas y reservar memoria
 Matriz *crear_matriz(int filas, int columnas)
 {
     Matriz *m = (Matriz *)malloc(sizeof(Matriz));
@@ -26,19 +37,15 @@ Matriz *crear_matriz(int filas, int columnas)
 #pragma endregion
 
 #pragma region KERNEL CUDA
-// [CUDA]El Kernel: Esta función corre DENTRO de la tarjeta gráfica
-// Calcula C = A * B. Cada hilo calcula UN solo píxel de la matriz resultado.
+
 __global__ void matmul_kernel(float *A, float *B, float *C, int rowsA, int colsA, int colsB)
 {
-    // Calculamos fila y columna global basándonos en el índice del hilo y del bloque
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Verificamos límites para no escribir fuera de memoria
     if (row < rowsA && col < colsB)
     {
         float sum = 0.0f;
-        // Producto punto: Fila de A contra Columna de B
         for (int k = 0; k < colsA; k++)
         {
             sum += A[row * colsA + k] * B[k * colsB + col];
@@ -46,170 +53,137 @@ __global__ void matmul_kernel(float *A, float *B, float *C, int rowsA, int colsA
         C[row * colsB + col] = sum;
     }
 }
+
 #pragma endregion
 
 #pragma region Manipular Matrices
 
-// Liberar la memoria ocupada por una matriz
 void liberar_matriz(Matriz *m)
 {
     if (m)
     {
-        if (m->datos)
-            free(m->datos);
+        if (m->datos) free(m->datos);
         free(m);
     }
 }
 
-// Inicializar una matriz con valores aleatorios entre -0.5 y 0.5
+// *** CORRECCIÓN CRÍTICA AQUÍ ***
 void inicializar_matriz_aleatoria(Matriz *m)
 {
+    // Escalar por 0.1 es VITAL para evitar "Dying ReLU" y saturación inicial
+    float escala = 0.1f;
     for (int i = 0; i < m->filas * m->columnas; i++)
     {
-        m->datos[i] = ((float)rand() / RAND_MAX) - 0.5f; // Valores entre -0.5 y 0.5
+        m->datos[i] = (((float)rand() / RAND_MAX) - 0.5f) * escala;
     }
 }
 
-// Llenar una matriz con limpiar_matriz
 void limpiar_matriz(Matriz *m)
 {
     memset(m->datos, 0, m->filas * m->columnas * sizeof(float));
 }
 
-// Multiplicar dos matrices A y B, almacenar el resultado en C
-// Se encarga de la logística: CPU -> GPU -> Kernel -> CPU
+// Función robusta con manejo de errores y memoria GPU
 void multiplicar_matrices(Matriz *A, Matriz *B, Matriz *C)
 {
     if (A->columnas != B->filas)
     {
-        printf("Error: dimensiones no compatibles.\n");
+        printf("Error Dimensiones: %dx%d * %dx%d\n", A->filas, A->columnas, B->filas, B->columnas);
         exit(1);
     }
 
-    // Calcular tamaños en bytes
     size_t size_A = A->filas * A->columnas * sizeof(float);
     size_t size_B = B->filas * B->columnas * sizeof(float);
     size_t size_C = C->filas * C->columnas * sizeof(float);
 
-    // Punteros para memoria en GPU
     float *d_A, *d_B, *d_C;
 
-    // Reservar memoria en la GPU (cudaMalloc)
-    cudaMalloc((void**)&d_A, size_A);
-    cudaMalloc((void**)&d_B, size_B);
-    cudaMalloc((void**)&d_C, size_C);
+    // Reservar memoria en GPU con chequeo de errores
+    CUDA_CHECK(cudaMalloc((void**)&d_A, size_A));
+    CUDA_CHECK(cudaMalloc((void**)&d_B, size_B));
+    CUDA_CHECK(cudaMalloc((void**)&d_C, size_C));
 
-    // Copiar datos de la RAM a la VRAM
-    cudaMemcpy(d_A, A->datos, size_A, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, B->datos, size_B, cudaMemcpyHostToDevice);
+    // Copiar a GPU
+    CUDA_CHECK(cudaMemcpy(d_A, A->datos, size_A, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_B, B->datos, size_B, cudaMemcpyHostToDevice));
 
-    // Configurar la cuadrícula de hilos
-    // Bloques de 16x16 hilos
+    // Configuración del Kernel
     dim3 threadsPerBlock(16, 16);
-    // Calculamos cuántos bloques necesitamos (redondeando hacia arriba)
     dim3 blocksPerGrid((C->columnas + 15) / 16, (C->filas + 15) / 16);
 
-    //LANZAR EL KERNEL
+    // Lanzar Kernel
     matmul_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, A->filas, A->columnas, B->columnas);
 
-    // Esperar a que la GPU termine
-    cudaDeviceSynchronize();
+    // Chequear si el lanzamiento falló
+    CUDA_CHECK(cudaGetLastError());
 
-    //Copiar resultados de vuelta a la CPU
-    cudaMemcpy(C->datos, d_C, size_C, cudaMemcpyDeviceToHost);
+    // Sincronizar
+    CUDA_CHECK(cudaDeviceSynchronize());
 
-    //Liberar memoria de GPU
+    // Traer resultados
+    CUDA_CHECK(cudaMemcpy(C->datos, d_C, size_C, cudaMemcpyDeviceToHost));
+
+    // Liberar GPU
     cudaFree(d_A);
     cudaFree(d_B);
     cudaFree(d_C);
 }
 
-// Calcular la transpuesta de una matriz A y almacenarla en B
-// Asume que B ya ha sido inicializada con las dimensiones correctas (Dimensiones invertidas de A)
-// Se utiliza para la propagación hacia atrás en redes neuronales: dW = A^T * dZ
 void transpuesta(Matriz *A, Matriz *B)
 {
     for (int i = 0; i < A->filas; i++)
-    {
         for (int j = 0; j < A->columnas; j++)
-        {
-            // La fila i, col j de A pasa a ser la fila j, col i de B
             B->datos[j * B->columnas + i] = A->datos[i * A->columnas + j];
-        }
-    }
 }
 
 void sumar_sesgo(Matriz *m, Matriz *b)
 {
     for (int i = 0; i < m->filas; i++)
-    {
         for (int j = 0; j < m->columnas; j++)
-        {
             m->datos[i * m->columnas + j] += b->datos[j];
-        }
-    }
 }
-// Multiplicar una matriz por un escalar
+
 void multiplicar_escalar(Matriz *m, float escalar)
 {
     for (int i = 0; i < m->filas * m->columnas; i++)
-    {
         m->datos[i] *= escalar;
-    }
 }
 
-// Restar matrices A = A - B
 void restar_matrices(Matriz *A, Matriz *B)
 {
     for (int i = 0; i < A->filas * A->columnas; i++)
-    {
         A->datos[i] -= B->datos[i];
-    }
 }
 
 #pragma endregion
 
 #pragma region Funciones Auxiliares
 
-// Función de activación ReLU: Si x < 0, devuelve 0; si x >= 0, devuelve x
 void relu(Matriz *m)
 {
     for (int i = 0; i < m->filas * m->columnas; i++)
-    {
-        if (m->datos[i] < 0)
-            m->datos[i] = 0;
-    }
+        if (m->datos[i] < 0) m->datos[i] = 0;
 }
 
-// Softmax: Convierte números en probabilidades
 void softmax(Matriz *m)
 {
     for (int i = 0; i < m->filas; i++)
     {
-        // Buscar máximo de la fila (estabilidad numérica)
         float max_val = -1e9;
         for (int j = 0; j < m->columnas; j++)
-        {
-            if (m->datos[i * m->columnas + j] > max_val)
-                max_val = m->datos[i * m->columnas + j];
-        }
-        // Exponencial y suma
+            if (m->datos[i * m->columnas + j] > max_val) max_val = m->datos[i * m->columnas + j];
+
         float sum = 0.0f;
         for (int j = 0; j < m->columnas; j++)
         {
             m->datos[i * m->columnas + j] = expf(m->datos[i * m->columnas + j] - max_val);
             sum += m->datos[i * m->columnas + j];
         }
-        // Normalizar para obtener probabilidades
         for (int j = 0; j < m->columnas; j++)
-        {
             m->datos[i * m->columnas + j] /= sum;
-        }
     }
 }
 
-// Encuentra el índice del valor más alto (Argmax)
-// Ej: Si la salida es [0.1, 0.8, 0.1], devuelve 1.
 int argmax(Matriz *m, int row)
 {
     float max_val = -1e9;
@@ -225,27 +199,65 @@ int argmax(Matriz *m, int row)
     return max_index;
 }
 
+float calcular_precision(Matriz *predicciones, Matriz *etiquetas)
+{
+    int correctos = 0;
+    for (int i = 0; i < predicciones->filas; i++)
+    {
+        if (argmax(predicciones, i) == (int)etiquetas->datos[i])
+            correctos++;
+    }
+    return (float)correctos / predicciones->filas;
+}
+
+float calcular_loss(Matriz *predicciones, Matriz *etiquetas, int num_clases)
+{
+    float loss = 0.0f;
+    const float epsilon = 1e-12f;
+    for (int i = 0; i < predicciones->filas; i++)
+    {
+        int etiqueta = (int)etiquetas->datos[i];
+        float pred = predicciones->datos[i * num_clases + etiqueta];
+        pred = fmaxf(pred, epsilon);
+        loss += -logf(pred);
+    }
+    return loss / predicciones->filas;
+}
+
+// Función para imprimir memoria de GPU
+void imprimir_uso_gpu() {
+    size_t free_byte ;
+    size_t total_byte ;
+    cudaError_t cuda_status = cudaMemGetInfo( &free_byte, &total_byte ) ;
+
+    if ( cudaSuccess != cuda_status ){
+        printf("Error: cudaMemGetInfo falla %s \n", cudaGetErrorString(cuda_status) );
+        return ;
+    }
+
+    double free_db = (double)free_byte ;
+    double total_db = (double)total_byte ;
+    double used_db = total_db - free_db ;
+
+    printf("  [GPU Mem] Usada: %.2f MB | Libre: %.2f MB | Total: %.2f MB\n",
+        used_db/1024.0/1024.0, free_db/1024.0/1024.0, total_db/1024.0/1024.0);
+}
+
 #pragma endregion
 
 #pragma region Cargar Datos
 
-// Convertir Bytes High Endian a Enteros
 int convertir_bytes_a_enteros(FILE *fp)
 {
     unsigned char buf[4];
-    if (fread(buf, sizeof(unsigned char), 4, fp) != 4)
-        return 0;
+    if (fread(buf, sizeof(unsigned char), 4, fp) != 4) return 0;
     return (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
 }
 
 Matriz *cargar_imagenes_dataset(const char *filename)
 {
     FILE *fp = fopen(filename, "rb");
-    if (!fp)
-    {
-        printf("Error abriendo %s\n", filename);
-        exit(1);
-    }
+    if (!fp) { printf("Error abriendo %s\n", filename); exit(1); }
 
     convertir_bytes_a_enteros(fp);
     int num_imgs = convertir_bytes_a_enteros(fp);
@@ -256,9 +268,7 @@ Matriz *cargar_imagenes_dataset(const char *filename)
     unsigned char temp;
     for (int i = 0; i < m->filas * m->columnas; i++)
     {
-        // Leer un byte por píxel
-        fread(&temp, sizeof(unsigned char), 1, fp);
-        // División por 255 para normalizar valores entre 0 y 1
+        if (fread(&temp, sizeof(unsigned char), 1, fp) != 1) break;
         m->datos[i] = (float)temp / 255.0f;
     }
     fclose(fp);
@@ -268,11 +278,7 @@ Matriz *cargar_imagenes_dataset(const char *filename)
 Matriz *cargar_etiquetas_dataset(const char *filename)
 {
     FILE *fp = fopen(filename, "rb");
-    if (!fp)
-    {
-        printf("Error abriendo %s\n", filename);
-        exit(1);
-    }
+    if (!fp) { printf("Error abriendo %s\n", filename); exit(1); }
 
     convertir_bytes_a_enteros(fp);
     int num_items = convertir_bytes_a_enteros(fp);
@@ -281,7 +287,7 @@ Matriz *cargar_etiquetas_dataset(const char *filename)
     unsigned char temp;
     for (int i = 0; i < num_items; i++)
     {
-        fread(&temp, sizeof(unsigned char), 1, fp);
+        if (fread(&temp, sizeof(unsigned char), 1, fp) != 1) break;
         m->datos[i] = (float)temp;
     }
     fclose(fp);
@@ -290,25 +296,34 @@ Matriz *cargar_etiquetas_dataset(const char *filename)
 
 #pragma endregion
 
-#pragma region Entrenamiento
-
 int main()
 {
-    srand(time(NULL)); // Semilla para números aleatorios
+    srand(time(NULL));
 
-    const int TAMAÑO_ENTRADA = 784; // 28x28 píxeles
+    const int TAMAÑO_ENTRADA = 784;
     const int TAMAÑO_CAPA_OCULTA = 512;
-    const int TAMAÑO_SALIDA = 10; // Dígitos 0-9
+    const int TAMAÑO_SALIDA = 10;
     const float TASA_APRENDIZAJE = 0.01f;
     const int EPOCAS = 10;
-    const int TAMAÑO_BATCH = 64;
+    const int TAMAÑO_BATCH = 512;
 
-    printf("Cargando datos...\n");
+    printf("=== MLP en CUDA (Optimizado) ===\n");
+
+    // Verificar GPU inicial
+    imprimir_uso_gpu();
+
+    printf("\nCargando datos...\n");
     Matriz *X_train = cargar_imagenes_dataset("./Resources/train-images.idx3-ubyte");
     Matriz *Y_train = cargar_etiquetas_dataset("./Resources/train-labels.idx1-ubyte");
-    printf("Entrenamiento: %d imagenes cargadas.\n", X_train->filas);
+    Matriz *X_test = cargar_imagenes_dataset("./Resources/t10k-images.idx3-ubyte");
+    Matriz *Y_test = cargar_etiquetas_dataset("./Resources/t10k-labels.idx1-ubyte");
 
-    // Inicializar pesos y sesgos
+    // Verificación rápida de datos
+    float suma_check = 0;
+    for(int i=0; i<784; i++) suma_check += X_train->datos[i];
+    if(suma_check < 1.0f) { printf("ERROR: Datos parecen vacíos.\n"); return 1; }
+    printf("Datos cargados correctamente. Train: %d, Test: %d\n", X_train->filas, X_test->filas);
+
     Matriz *W1 = crear_matriz(TAMAÑO_ENTRADA, TAMAÑO_CAPA_OCULTA);
     inicializar_matriz_aleatoria(W1);
     Matriz *b1 = crear_matriz(1, TAMAÑO_CAPA_OCULTA);
@@ -318,107 +333,88 @@ int main()
     Matriz *b2 = crear_matriz(1, TAMAÑO_SALIDA);
     limpiar_matriz(b2);
 
-    // Reservar memoria
+    // Buffers reutilizables
     Matriz *X_batch = crear_matriz(TAMAÑO_BATCH, TAMAÑO_ENTRADA);
     Matriz *Y_batch = crear_matriz(TAMAÑO_BATCH, 1);
-
-    // Temporales de propagación hacia adelante
     Matriz *Z1 = crear_matriz(TAMAÑO_BATCH, TAMAÑO_CAPA_OCULTA);
     Matriz *A1 = crear_matriz(TAMAÑO_BATCH, TAMAÑO_CAPA_OCULTA);
     Matriz *Z2 = crear_matriz(TAMAÑO_BATCH, TAMAÑO_SALIDA);
     Matriz *A2 = crear_matriz(TAMAÑO_BATCH, TAMAÑO_SALIDA);
-
-    // Temporales de propagación hacia atrás
     Matriz *dZ2 = crear_matriz(TAMAÑO_BATCH, TAMAÑO_SALIDA);
     Matriz *dW2 = crear_matriz(TAMAÑO_CAPA_OCULTA, TAMAÑO_SALIDA);
     Matriz *db2 = crear_matriz(1, TAMAÑO_SALIDA);
     Matriz *A1_T = crear_matriz(TAMAÑO_CAPA_OCULTA, TAMAÑO_BATCH);
-
     Matriz *dZ1 = crear_matriz(TAMAÑO_BATCH, TAMAÑO_CAPA_OCULTA);
     Matriz *dW1 = crear_matriz(TAMAÑO_ENTRADA, TAMAÑO_CAPA_OCULTA);
     Matriz *db1 = crear_matriz(1, TAMAÑO_CAPA_OCULTA);
     Matriz *W2_T = crear_matriz(TAMAÑO_SALIDA, TAMAÑO_CAPA_OCULTA);
     Matriz *X_batch_T = crear_matriz(TAMAÑO_ENTRADA, TAMAÑO_BATCH);
 
-    // Indices para mezclar datos
     int *indices = (int *)malloc(X_train->filas * sizeof(int));
-    for (int k = 0; k < X_train->filas; k++)
-        indices[k] = k;
+    for (int k = 0; k < X_train->filas; k++) indices[k] = k;
 
-    // Medición de tiempo
-    clock_t inicio_tiempo = clock();
-    // Bucle de entrenamiento
+    clock_t inicio_total = clock();
+
+    printf("\nIniciando Entrenamiento...\n");
     for (int epoca = 0; epoca < EPOCAS; epoca++)
     {
-        // Mezclar datos al inicio de cada época
+        clock_t inicio_epoca = clock(); // Cronómetro época
+
+        // Shuffle
         for (int k = X_train->filas - 1; k > 0; k--)
         {
             int j = rand() % (k + 1);
-            int temp = indices[k];
-            indices[k] = indices[j];
-            indices[j] = temp;
+            int temp = indices[k]; indices[k] = indices[j]; indices[j] = temp;
         }
 
         for (int i = 0; i < X_train->filas; i += TAMAÑO_BATCH)
         {
             int batch_actual = (i + TAMAÑO_BATCH > X_train->filas) ? X_train->filas - i : TAMAÑO_BATCH;
-            // Preparar Batch
+
+            // Cargar Batch
             for (int b = 0; b < batch_actual; b++)
             {
                 int idx = indices[i + b];
                 memcpy(&X_batch->datos[b * TAMAÑO_ENTRADA], &X_train->datos[idx * TAMAÑO_ENTRADA], TAMAÑO_ENTRADA * sizeof(float));
                 Y_batch->datos[b] = Y_train->datos[idx];
             }
-            // Ajustar tamaño lógico de matrices batch (por si el último es menor)
-            X_batch->filas = batch_actual;
-            Z1->filas = batch_actual;
-            A1->filas = batch_actual;
-            Z2->filas = batch_actual;
-            A2->filas = batch_actual;
 
-            // Propagación hacia adelante
-            multiplicar_matrices(X_batch, W1, Z1); //Llamado interno a CUDA
+            // Ajustar dimensiones lógicas
+            X_batch->filas = batch_actual; Z1->filas = batch_actual; A1->filas = batch_actual;
+            Z2->filas = batch_actual; A2->filas = batch_actual;
+
+            // Forward
+            multiplicar_matrices(X_batch, W1, Z1);
             sumar_sesgo(Z1, b1);
             memcpy(A1->datos, Z1->datos, batch_actual * TAMAÑO_CAPA_OCULTA * sizeof(float));
             relu(A1);
 
-            multiplicar_matrices(A1, W2, Z2); //Llamado interno a CUDA
+            multiplicar_matrices(A1, W2, Z2);
             sumar_sesgo(Z2, b2);
             memcpy(A2->datos, Z2->datos, batch_actual * TAMAÑO_SALIDA * sizeof(float));
             softmax(A2);
 
-            // Propagación hacia atrás
-            // dZ2 = A2 - Y (one-hot)
+            // Backward
             memcpy(dZ2->datos, A2->datos, batch_actual * TAMAÑO_SALIDA * sizeof(float));
             for (int b = 0; b < batch_actual; b++)
-            {
                 dZ2->datos[b * TAMAÑO_SALIDA + (int)Y_batch->datos[b]] -= 1.0f;
-            }
 
-            // Grads Capa 2
-            A1->filas = batch_actual; // Asegurar dim correcta
+            A1->filas = batch_actual;
             transpuesta(A1, A1_T);
-            multiplicar_matrices(A1_T, dZ2, dW2); //Llamado interno a CUDA
+            multiplicar_matrices(A1_T, dZ2, dW2);
             multiplicar_escalar(dW2, 1.0f / batch_actual);
 
             limpiar_matriz(db2);
             for (int r = 0; r < batch_actual; r++)
-            {
                 for (int c = 0; c < TAMAÑO_SALIDA; c++)
                     db2->datos[c] += dZ2->datos[r * TAMAÑO_SALIDA + c];
-            }
             multiplicar_escalar(db2, 1.0f / batch_actual);
 
-            // Error Capa 1
             transpuesta(W2, W2_T);
-            multiplicar_matrices(dZ2, W2_T, dZ1); //Llamado interno a CUDA
+            multiplicar_matrices(dZ2, W2_T, dZ1);
             for (int k = 0; k < batch_actual * TAMAÑO_CAPA_OCULTA; k++)
-            {
-                if (Z1->datos[k] <= 0)
-                    dZ1->datos[k] = 0.0f; // Derivada ReLU
-            }
+                if (Z1->datos[k] <= 0) dZ1->datos[k] = 0.0f;
 
-            // Grads Capa 1
             X_batch->filas = batch_actual;
             transpuesta(X_batch, X_batch_T);
             multiplicar_matrices(X_batch_T, dZ1, dW1);
@@ -426,60 +422,82 @@ int main()
 
             limpiar_matriz(db1);
             for (int r = 0; r < batch_actual; r++)
-            {
                 for (int c = 0; c < TAMAÑO_CAPA_OCULTA; c++)
                     db1->datos[c] += dZ1->datos[r * TAMAÑO_CAPA_OCULTA + c];
-            }
             multiplicar_escalar(db1, 1.0f / batch_actual);
 
-            // Actualizar parámetros
-            multiplicar_escalar(dW1, TASA_APRENDIZAJE);
-            restar_matrices(W1, dW1);
-            multiplicar_escalar(db1, TASA_APRENDIZAJE);
-            restar_matrices(b1, db1);
-            multiplicar_escalar(dW2, TASA_APRENDIZAJE);
-            restar_matrices(W2, dW2);
-            multiplicar_escalar(db2, TASA_APRENDIZAJE);
-            restar_matrices(b2, db2);
+            multiplicar_escalar(dW1, TASA_APRENDIZAJE); restar_matrices(W1, dW1);
+            multiplicar_escalar(db1, TASA_APRENDIZAJE); restar_matrices(b1, db1);
+            multiplicar_escalar(dW2, TASA_APRENDIZAJE); restar_matrices(W2, dW2);
+            multiplicar_escalar(db2, TASA_APRENDIZAJE); restar_matrices(b2, db2);
         }
-        printf("Epoca %d completada.\n", epoca + 1);
+
+        // Métricas de fin de época
+        double tiempo_epoca = (double)(clock() - inicio_epoca) / CLOCKS_PER_SEC;
+
+        Matriz *Z1_eval = crear_matriz(X_train->filas, TAMAÑO_CAPA_OCULTA);
+        Matriz *A1_eval = crear_matriz(X_train->filas, TAMAÑO_CAPA_OCULTA);
+        Matriz *Z2_eval = crear_matriz(X_train->filas, TAMAÑO_SALIDA);
+        Matriz *A2_eval = crear_matriz(X_train->filas, TAMAÑO_SALIDA);
+
+        multiplicar_matrices(X_train, W1, Z1_eval);
+        sumar_sesgo(Z1_eval, b1);
+        memcpy(A1_eval->datos, Z1_eval->datos, X_train->filas * TAMAÑO_CAPA_OCULTA * sizeof(float));
+        relu(A1_eval);
+        multiplicar_matrices(A1_eval, W2, Z2_eval);
+        sumar_sesgo(Z2_eval, b2);
+        memcpy(A2_eval->datos, Z2_eval->datos, X_train->filas * TAMAÑO_SALIDA * sizeof(float));
+        softmax(A2_eval);
+
+        float acc = calcular_precision(A2_eval, Y_train);
+        float loss = calcular_loss(A2_eval, Y_train, TAMAÑO_SALIDA);
+
+        printf("Epoca %d/%d | Tiempo: %.2fs | Loss: %.4f | Acc: %.4f",
+               epoca + 1, EPOCAS, tiempo_epoca, loss, acc);
+
+        // Imprimir uso de GPU al final de la línea
+        imprimir_uso_gpu();
+
+        liberar_matriz(Z1_eval); liberar_matriz(A1_eval);
+        liberar_matriz(Z2_eval); liberar_matriz(A2_eval);
     }
-#pragma endregion
-#pragma region Evaluación
-    double total_time = (double)(clock() - inicio_tiempo) / CLOCKS_PER_SEC;
-    printf("Entrenamiento C finalizado en %.2f segundos.\n", total_time);
 
-#pragma endregion
+    double total_time = (double)(clock() - inicio_total) / CLOCKS_PER_SEC;
+    printf("\nEntrenamiento finalizado en %.2f segundos.\n", total_time);
 
-#pragma region Limpiar Memoria
+    // Evaluación Final
+    Matriz *Z1_test = crear_matriz(X_test->filas, TAMAÑO_CAPA_OCULTA);
+    Matriz *A1_test = crear_matriz(X_test->filas, TAMAÑO_CAPA_OCULTA);
+    Matriz *Z2_test = crear_matriz(X_test->filas, TAMAÑO_SALIDA);
+    Matriz *A2_test = crear_matriz(X_test->filas, TAMAÑO_SALIDA);
+
+    multiplicar_matrices(X_test, W1, Z1_test);
+    sumar_sesgo(Z1_test, b1);
+    memcpy(A1_test->datos, Z1_test->datos, X_test->filas * TAMAÑO_CAPA_OCULTA * sizeof(float));
+    relu(A1_test);
+    multiplicar_matrices(A1_test, W2, Z2_test);
+    sumar_sesgo(Z2_test, b2);
+    memcpy(A2_test->datos, Z2_test->datos, X_test->filas * TAMAÑO_SALIDA * sizeof(float));
+    softmax(A2_test);
+
+    float acc_test = calcular_precision(A2_test, Y_test);
+    printf("\n=== RESULTADO FINAL (TEST) ===\n");
+    printf("Precision: %.2f%%\n", acc_test * 100.0f);
+
+    // Liberar todo
     free(indices);
-    liberar_matriz(X_train);
-    liberar_matriz(Y_train);
-    liberar_matriz(W1);
-    liberar_matriz(b1);
-    liberar_matriz(W2);
-    liberar_matriz(b2);
-    liberar_matriz(X_batch);
-    liberar_matriz(Y_batch);
-    liberar_matriz(Z1);
-    liberar_matriz(A1);
-    liberar_matriz(Z2);
-    liberar_matriz(A2);
-    liberar_matriz(dZ2);
-    liberar_matriz(dW2);
-    liberar_matriz(db2);
-    liberar_matriz(A1_T);
-    liberar_matriz(dZ1);
-    liberar_matriz(dW1);
-    liberar_matriz(db1);
-    liberar_matriz(W2_T);
-    liberar_matriz(X_batch_T);
-#pragma endregion
+    liberar_matriz(X_train); liberar_matriz(Y_train);
+    liberar_matriz(X_test); liberar_matriz(Y_test);
+    liberar_matriz(W1); liberar_matriz(b1);
+    liberar_matriz(W2); liberar_matriz(b2);
+    liberar_matriz(X_batch); liberar_matriz(Y_batch);
+    liberar_matriz(Z1); liberar_matriz(A1);
+    liberar_matriz(Z2); liberar_matriz(A2);
+    liberar_matriz(dZ2); liberar_matriz(dW2); liberar_matriz(db2);
+    liberar_matriz(A1_T); liberar_matriz(dZ1); liberar_matriz(dW1);
+    liberar_matriz(db1); liberar_matriz(W2_T); liberar_matriz(X_batch_T);
+    liberar_matriz(Z1_test); liberar_matriz(A1_test);
+    liberar_matriz(Z2_test); liberar_matriz(A2_test);
+
     return 0;
 }
-
-#pragma region Ejecución
-// Ejecutar con:
-// gcc mainB.c -o mlp -lm -O3
-// ./mlp
-#pragma endregion

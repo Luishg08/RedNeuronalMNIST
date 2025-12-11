@@ -51,6 +51,14 @@ def one_hot(y, num_classes):
     one_hot_y = np.zeros((y.size, num_classes))
     one_hot_y[np.arange(y.size), y] = 1
     return one_hot_y
+
+def calcular_loss(A2, Y):
+    """Calcula el promedio de la Pérdida de Entropía Cruzada (Cross-Entropy Loss)."""
+    m = Y.size
+    Y_one_hot = one_hot(Y, TAMAÑO_SALIDA)
+    A2_clipped = np.clip(A2, 1e-12, 1.0 - 1e-12)
+    cost = - (1/m) * np.sum(Y_one_hot * np.log(A2_clipped))
+    return cost
 #endregion
 
 #region Lógica Neuronal (Funciones base)
@@ -178,13 +186,32 @@ def entrenar_red():
                                                         dW1_global, db1_global, dW2_global, db2_global,
                                                         TASA_APRENDIZAJE)
 
-            # Cálculo de precisión (solo sobre el último batch)
-            A2, _ = propagacion_adelante(X_batch, W1, b1, W2, b2)
+            # --- Cálculo y Reporte de Métricas al final de la Época ---
+            # Volvemos a calcular A2 usando todo el dataset mezclado para métricas de época
+            A2_epoca, _ = propagacion_adelante(X_shuffled, W1, b1, W2, b2)
+            
+            # Precisión
+            precision_train = np.mean(np.argmax(A2_epoca, axis=1) == y_shuffled)
+            
+            # Pérdida (Loss)
+            loss_train = calcular_loss(A2_epoca, y_shuffled)
+            
             print(f"Época {epoca+1}/{EPOCAS} completada")
-            print(f"Precisión etapa {epoca+1}: {np.mean(np.argmax(A2, axis=1) == y_batch):.4f}")
+            print(f"  -> Precisión Entrenamiento: {precision_train:.4f}")
+            print(f"  -> Loss Entrenamiento: {loss_train:.4f}")
 
     fin_tiempo = time.time()
-    print(f"Entrenamiento finalizado en {fin_tiempo - inicio_tiempo:.2f} segundos con {N_WORKERS} workers.")
+    print(f"\nEntrenamiento finalizado en {fin_tiempo - inicio_tiempo:.2f} segundos con {N_WORKERS} workers.")
+    
+    # --- Evaluación Final en Conjunto de Prueba ---
+    print("\n--- Evaluando en el conjunto de prueba ---")
+    A2_test, _ = propagacion_adelante(X_test, W1, b1, W2, b2)
+    precision_test = np.mean(np.argmax(A2_test, axis=1) == y_test)
+    loss_test = calcular_loss(A2_test, y_test)
+    
+    print(f"Precisión Final (Test): {precision_test:.4f} ({int(precision_test * 100)}%)")
+    print(f"Loss Final (Test): {loss_test:.4f}")
+    print(f"Imágenes correctas: {int(precision_test * len(y_test))}/{len(y_test)}")
 
 #endregion
 
